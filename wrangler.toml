@@ -1,0 +1,11 @@
+name = "chatlite-internet-relay"
+main = "index.js"
+compatibility_date = "2026-10-25"
+
+[[durable_objects.bindings]]
+name = "CHATLITE_ROOMS"
+class_name = "ChatLiteRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatLiteRoom"]
