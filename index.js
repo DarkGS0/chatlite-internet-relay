@@ -95,8 +95,11 @@ export class ChatLiteProfile {
     const url = new URL(request.url);
     if (url.pathname === "/_internal/status" && request.method === "GET") {
       const info = await this.state.storage.get("profile") || {};
+      const online = !!(this.authenticated && this.socket && this.socket.readyState === 1);
+      const token = String(info.roomToken || "");
+      const internetRoom = online && !!info.internetRoom && TOKEN.test(token);
       return json({ id: info.id || "", name: info.name || "Usuario", photo: info.photo || "", port: info.port || 39852,
-        activity: info.activity || "", online: !!(this.authenticated && this.socket && this.socket.readyState === 1) });
+        activity: info.activity || "", online, internetRoom, roomToken: internetRoom ? token : "" });
     }
     if (url.pathname === "/_internal/deliver" && request.method === "POST") {
       let event;
@@ -172,11 +175,15 @@ export class ChatLiteProfile {
         return;
       }
       if (!storedHash) await this.state.storage.put("secret_hash", secretHash);
+      const initialRoomToken = cleanText(message.roomToken || "", 96);
+      const initialInternetRoom = message.internetRoom === true && TOKEN.test(initialRoomToken);
       this.profile = {
         id: message.profile, name: cleanText(message.name || "Usuario", 10),
         photo: cleanText(message.photo || "", 180000),
         port: Number.isInteger(message.port) && message.port > 0 && message.port <= 65535 ? message.port : 39852,
-        activity: cleanText(message.activity || "", 80)
+        activity: cleanText(message.activity || "", 80),
+        internetRoom: initialInternetRoom,
+        roomToken: initialInternetRoom ? initialRoomToken : ""
       };
       this.authenticated = true;
       this.profileId = this.profile.id;
@@ -192,6 +199,10 @@ export class ChatLiteProfile {
       this.profile.photo = cleanText(message.photo || this.profile.photo, 180000);
       this.profile.port = Number.isInteger(message.port) && message.port > 0 && message.port <= 65535 ? message.port : 39852;
       this.profile.activity = cleanText(message.activity || "", 80);
+      const updatedRoomToken = cleanText(message.roomToken || "", 96);
+      const updatedInternetRoom = message.internetRoom === true && TOKEN.test(updatedRoomToken);
+      this.profile.internetRoom = updatedInternetRoom;
+      this.profile.roomToken = updatedInternetRoom ? updatedRoomToken : "";
       await this.state.storage.put("profile", this.profile);
       this.safeText(ws, JSON.stringify({ t: "profile_updated" }));
       return;
@@ -205,11 +216,15 @@ export class ChatLiteProfile {
           const stub = this.env.CHATLITE_PROFILES.get(this.env.CHATLITE_PROFILES.idFromName(friendId));
           const response = await stub.fetch("https://internal/_internal/status");
           const status = await response.json();
-          this.safeText(ws, JSON.stringify({ t: "presence", id: friendId, online: !!status.online,
+          const online = !!status.online;
+          const roomToken = String(status.roomToken || "");
+          const internetRoom = online && !!status.internetRoom && TOKEN.test(roomToken);
+          this.safeText(ws, JSON.stringify({ t: "presence", id: friendId, online,
             name: cleanText(status.name || "Usuario", 10), photo: cleanText(status.photo || "", 180000),
-            port: status.port || 39852, activity: cleanText(status.activity || "", 80) }));
+            port: status.port || 39852, activity: cleanText(status.activity || "", 80),
+            internetRoom, roomToken: internetRoom ? roomToken : "" }));
         } catch (_) {
-          this.safeText(ws, JSON.stringify({ t: "presence", id: friendId, online: false, name: "Usuario", photo: "", port: 39852, activity: "" }));
+          this.safeText(ws, JSON.stringify({ t: "presence", id: friendId, online: false, name: "Usuario", photo: "", port: 39852, activity: "", internetRoom: false, roomToken: "" }));
         }
       }
       return;
