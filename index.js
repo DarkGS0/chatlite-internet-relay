@@ -17,18 +17,27 @@ function cleanText(value, max) {
   return String(value == null ? "" : value).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").slice(0, max);
 }
 function validProfile(value) { return PROFILE_ID.test(String(value || "")); }
+function normalizeEdgeCountry(value) {
+  const code = String(value || "").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) && code !== "XX" ? code : "";
+}
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
-      return json({ service: "ChatLite Internet Relay", status: "online", protocol: 2, features: ["global_friends", "private_messages", "offline_mailbox", "hibernation"] });
+      return json({ service: "ChatLite Internet Relay", status: "online", protocol: 2, features: ["global_friends", "private_messages", "offline_mailbox", "hibernation", "public_ip_country"] });
     }
     if (url.pathname === "/global") {
       if (!isWebSocket(request)) return json({ error: "websocket_required" }, 426);
       const profile = (url.searchParams.get("profile") || "").trim();
       if (!validProfile(profile)) return json({ error: "invalid_profile_id" }, 400);
-      return env.CHATLITE_PROFILES.get(env.CHATLITE_PROFILES.idFromName(profile)).fetch(request);
+      // Capture the actual public-IP country at the edge; never trust a country sent by the client.
+      const edgeCountry = normalizeEdgeCountry(request.cf && request.cf.country);
+      const forwardedHeaders = new Headers(request.headers);
+      forwardedHeaders.set("X-ChatLite-Edge-Country", edgeCountry);
+      const forwardedRequest = new Request(request, { headers: forwardedHeaders });
+      return env.CHATLITE_PROFILES.get(env.CHATLITE_PROFILES.idFromName(profile)).fetch(forwardedRequest);
     }
     if (url.pathname !== "/ws" && url.pathname !== "/stream") {
       return json({ error: "not_found" }, 404);
@@ -51,6 +60,7 @@ export class ChatLiteProfile {
     this.profileId = "";
     this.authenticated = false;
     this.profile = null;
+    this.edgeCountry = "";
     this.sentAt = [];
 
     // Restore the active socket after the Durable Object hibernates.
@@ -62,6 +72,7 @@ export class ChatLiteProfile {
       this.socket = ws;
       this.profileId = String(attachment.profileId || "");
       this.authenticated = !!attachment.authenticated;
+      this.edgeCountry = normalizeEdgeCountry(attachment.edgeCountry);
     }
   }
 
@@ -71,6 +82,7 @@ export class ChatLiteProfile {
       this.socket = ws;
       this.profileId = String(attachment.profileId || "");
       this.authenticated = !!attachment.authenticated;
+      this.edgeCountry = normalizeEdgeCountry(attachment.edgeCountry);
       this.profile = null;
     }
     // Metadata is persisted because the in-memory object is recreated after hibernation.
@@ -98,7 +110,7 @@ export class ChatLiteProfile {
       const online = !!(this.authenticated && this.socket && this.socket.readyState === 1);
       const token = String(info.roomToken || "");
       const internetRoom = online && !!info.internetRoom && TOKEN.test(token);
-      return json({ id: info.id || "", name: info.name || "Usuario", photo: info.photo || "", port: info.port || 39852,
+      return json({ id: info.id || "", name: info.name || "Usuario", photo: info.photo || "", country: info.country || "", port: info.port || 39852,
         activity: info.activity || "", online, internetRoom, roomToken: internetRoom ? token : "" });
     }
     if (url.pathname === "/_internal/deliver" && request.method === "POST") {
@@ -138,7 +150,8 @@ export class ChatLiteProfile {
       try { this.socket.close(4001, "new connection"); } catch (_) {}
     }
     await this.state.storage.put("profile_id", requestedProfile);
-    server.serializeAttachment({ profileId: requestedProfile, authenticated: false });
+    this.edgeCountry = normalizeEdgeCountry(request.headers.get("X-ChatLite-Edge-Country"));
+    server.serializeAttachment({ profileId: requestedProfile, authenticated: false, edgeCountry: this.edgeCountry });
     // Hibernation API keeps this connection open without pinning the DO in memory.
     this.state.acceptWebSocket(server);
     this.socket = server;
@@ -180,6 +193,7 @@ export class ChatLiteProfile {
       this.profile = {
         id: message.profile, name: cleanText(message.name || "Usuario", 10),
         photo: cleanText(message.photo || "", 180000),
+        country: this.edgeCountry,
         port: Number.isInteger(message.port) && message.port > 0 && message.port <= 65535 ? message.port : 39852,
         activity: cleanText(message.activity || "", 80),
         internetRoom: initialInternetRoom,
@@ -187,9 +201,9 @@ export class ChatLiteProfile {
       };
       this.authenticated = true;
       this.profileId = this.profile.id;
-      ws.serializeAttachment({ profileId: this.profile.id, authenticated: true });
+      ws.serializeAttachment({ profileId: this.profile.id, authenticated: true, edgeCountry: this.edgeCountry });
       await this.state.storage.put("profile", this.profile);
-      this.safeText(ws, JSON.stringify({ t: "auth_ok", protocol: 2 }));
+      this.safeText(ws, JSON.stringify({ t: "auth_ok", protocol: 2, country: this.profile.country || "" }));
       await this.deliverQueued(ws);
       return;
     }
@@ -197,6 +211,7 @@ export class ChatLiteProfile {
     if (message.t === "profile_update") {
       this.profile.name = cleanText(message.name || this.profile.name, 10) || "Usuario";
       this.profile.photo = cleanText(message.photo || this.profile.photo, 180000);
+      this.profile.country = this.edgeCountry || this.profile.country || "";
       this.profile.port = Number.isInteger(message.port) && message.port > 0 && message.port <= 65535 ? message.port : 39852;
       this.profile.activity = cleanText(message.activity || "", 80);
       const updatedRoomToken = cleanText(message.roomToken || "", 96);
@@ -204,7 +219,7 @@ export class ChatLiteProfile {
       this.profile.internetRoom = updatedInternetRoom;
       this.profile.roomToken = updatedInternetRoom ? updatedRoomToken : "";
       await this.state.storage.put("profile", this.profile);
-      this.safeText(ws, JSON.stringify({ t: "profile_updated" }));
+      this.safeText(ws, JSON.stringify({ t: "profile_updated", country: this.profile.country || "" }));
       return;
     }
     if (message.t === "presence_query") {
@@ -221,10 +236,11 @@ export class ChatLiteProfile {
           const internetRoom = online && !!status.internetRoom && TOKEN.test(roomToken);
           this.safeText(ws, JSON.stringify({ t: "presence", id: friendId, online,
             name: cleanText(status.name || "Usuario", 10), photo: cleanText(status.photo || "", 180000),
+            country: cleanText(status.country || "", 64),
             port: status.port || 39852, activity: cleanText(status.activity || "", 80),
             internetRoom, roomToken: internetRoom ? roomToken : "" }));
         } catch (_) {
-          this.safeText(ws, JSON.stringify({ t: "presence", id: friendId, online: false, name: "Usuario", photo: "", port: 39852, activity: "", internetRoom: false, roomToken: "" }));
+          this.safeText(ws, JSON.stringify({ t: "presence", id: friendId, online: false, name: "Usuario", photo: "", country: "", port: 39852, activity: "", internetRoom: false, roomToken: "" }));
         }
       }
       return;
