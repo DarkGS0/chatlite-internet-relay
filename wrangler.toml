@@ -1,0 +1,27 @@
+name = "chatlite-internet-relay"
+main = "index.js"
+compatibility_date = "2026-10-25"
+
+[[durable_objects.bindings]]
+name = "CHATLITE_ROOMS"
+class_name = "ChatLiteRoom"
+
+[[durable_objects.bindings]]
+name = "CHATLITE_PROFILES"
+class_name = "ChatLiteProfile"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatLiteRoom"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["ChatLiteProfile"]
+
+[[durable_objects.bindings]]
+name = "CHATLITE_VPN_ROOMS"
+class_name = "ChatLiteVpnRoom"
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["ChatLiteVpnRoom"]

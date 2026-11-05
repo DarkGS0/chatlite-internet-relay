@@ -1,0 +1,12 @@
+{
+  "name": "chatlite-internet-relay",
+  "private": true,
+  "version": "1.0.0",
+  "description": "ChatLite Internet relay server",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.152.0"
+  }
+}
